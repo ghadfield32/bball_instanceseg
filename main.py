@@ -1,14 +1,3 @@
-# Download required files from torchvision
-urls = [
-    "https://raw.githubusercontent.com/pytorch/vision/main/references/detection/engine.py",
-    "https://raw.githubusercontent.com/pytorch/vision/main/references/detection/utils.py",
-    "https://raw.githubusercontent.com/pytorch/vision/main/references/detection/coco_utils.py",
-    "https://raw.githubusercontent.com/pytorch/vision/main/references/detection/coco_eval.py",
-    "https://raw.githubusercontent.com/pytorch/vision/main/references/detection/transforms.py"
-]
-download_files(urls)
-
-
 #example usage
 !python train.py --api_key htpcxp3XQh7SsgMfjJns \
                 --workspace basketball-formations \

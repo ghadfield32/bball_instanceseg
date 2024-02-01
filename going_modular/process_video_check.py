@@ -5,6 +5,7 @@ import numpy as np
 from torchvision.transforms import v2 as T
 from torchvision.utils import draw_bounding_boxes, draw_segmentation_masks
 
+
 def intersects(box1, box2):
     x1_min, y1_min, x1_max, y1_max = box1.tolist()
     x2_min, y2_min, x2_max, y2_max = box2.tolist()
