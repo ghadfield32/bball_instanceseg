@@ -27,7 +27,7 @@ def main(args):
 
     dataset = get_project(args.api_key, args.workspace, args.project_name, args.version)
 
-    classes = load_classes_from_json(f'{args.project_folder_name}-{args.version}/test/_annotations.coco.json')
+    classes = load_classes_from_json(f'{args.project_folder_name}-{args.version}/train/_annotations.coco.json')
     print("Classes loaded:", classes)
 
     num_classes = len(classes) + 1
