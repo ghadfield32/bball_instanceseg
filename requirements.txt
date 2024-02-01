@@ -32,25 +32,26 @@ datasets #hugging face
 
 fastapi #fastapi
 uvicorn #fastapi
+python-multipart #fastapi
 
 #for bytetracker
 #torch>=1.7
 #opencv_python
-loguru
-scikit-image
-tqdm
+#loguru
+#scikit-image
+#tqdm
 #torchvision>=0.10.0
-Pillow
-thop
-ninja
-tabulate
+#Pillow
+#thop
+#ninja
+#tabulate
 #tensorboard
-lapx #lap alternative
-motmetrics
-filterpy
-h5py
+#lapx #lap alternative
+#motmetrics
+#filterpy
+#h5py
 
 # verified versions
-onnx #==1.8.1
-onnxruntime #== 1.15.0
-onnx-simplifier #==0.3.5
+#onnx #==1.8.1
+#onnxruntime #== 1.15.0
+#onnx-simplifier #==0.3.5
