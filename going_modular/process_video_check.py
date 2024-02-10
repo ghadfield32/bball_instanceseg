@@ -40,6 +40,9 @@ def process_video_check(video_path, model, device, classes, classes_to_track, th
         pred_labels = pred_labels[keep]
         pred_masks = pred_masks[keep]
 
+        print(f"Original Frame Size: {frame.shape}")
+        print(f"Pred Boxes before drawing: {pred_boxes}")
+
         if not keep.any():
             continue  # Skip this frame if no detections are kept
 
@@ -74,6 +77,9 @@ def process_video_check(video_path, model, device, classes, classes_to_track, th
         cv2.putText(output_image, f'Score: {score}', (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
 
         cv2.imshow('Frame', output_image)
+        
+        # Just before cv2.imshow
+        print(f"Output Image Size: {output_image.shape}")
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break

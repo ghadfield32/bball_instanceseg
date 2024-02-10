@@ -29,6 +29,9 @@ roboflow
 ultralytics
 transformers #hugging face
 datasets #hugging face
+huggingface_hub #hugging face
+
+tensorflow #deepsort
 
 fastapi #fastapi
 uvicorn #fastapi

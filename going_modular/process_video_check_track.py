@@ -1,116 +1,136 @@
-
 import cv2
-import torch
 import numpy as np
-from torchvision.transforms import v2 as T
+import torch
+from torchvision.transforms.functional import to_tensor, convert_image_dtype
 from torchvision.utils import draw_bounding_boxes, draw_segmentation_masks
-from ByteTrack.yolox.tracker.byte_tracker import BYTETracker
+import torchvision.transforms.functional as F
+from bytetracker.kalman_filter import KalmanFilter
+from torchvision.ops import box_convert
 
-# Define ByteTrack arguments (customize as needed)
-class ByteTrackArgument:
-    track_thresh = 0.5
-    track_buffer = 30
-    match_thresh = 0.8
-    aspect_ratio_thresh = 1.6
-    min_box_area = 10
+# Utility Functions
+def tlwh_to_xyah(tlwh):
+    x, y, w, h = tlwh
+    center_x = x + w / 2
+    center_y = y + h / 2
+    aspect_ratio = w / h
+    return np.array([center_x, center_y, aspect_ratio, h])
 
-def intersects(box1, box2):
-    x1_min, y1_min, x1_max, y1_max = box1.tolist()
-    x2_min, y2_min, x2_max, y2_max = box2.tolist()
-    return (x1_min < x2_max and x1_max > x2_min and y1_min < y2_max and y1_max > y2_min)
+def xyah_to_tlwh(xyah):
+    """
+    Convert the state vector (including velocity or other components)
+    back to the top-left x, y, width, height (tlwh) bounding box format.
+    """
+    # Ensure xyah only contains [center_x, center_y, aspect_ratio, height]
+    if len(xyah) > 4:
+        xyah = xyah[:4]  # Consider only the first 4 components for conversion
+    center_x, center_y, aspect_ratio, h = xyah
+    w = aspect_ratio * h
+    tlwh = np.array([center_x - w / 2, center_y - h / 2, w, h])
+    return tlwh
 
-def process_video_check_track(video_path, model, device, classes, classes_to_track, threshold=0.5):
+# Track Class
+class Track:
+    _id_count = 1
+    
+    def __init__(self, tlwh, score):
+        self.kalman_filter = KalmanFilter()
+        self.xyah = tlwh_to_xyah(tlwh)
+        self.state, self.covariance = self.kalman_filter.initiate(self.xyah)
+        self.track_id = Track._id_count
+        Track._id_count += 1
+        self.score = score
+        self.hits = 1
+        self.age = 1
+        self.time_since_update = 0
+
+    def predict(self):
+        self.state, self.covariance = self.kalman_filter.predict(self.state, self.covariance)
+        self.age += 1
+        self.time_since_update += 1
+
+    def update(self, tlwh):
+        self.xyah = tlwh_to_xyah(tlwh)
+        self.state, self.covariance = self.kalman_filter.update(self.state, self.covariance, self.xyah)
+        self.hits += 1
+        self.time_since_update = 0
+
+    def get_tlwh(self):
+        return xyah_to_tlwh(self.state[:4])
+
+def iou(bbox1, bbox2):
+    x1, y1, w1, h1 = bbox1
+    x2, y2, w2, h2 = bbox2
+    xi1, yi1 = max(x1, x2), max(y1, y2)
+    xi2, yi2 = min(x1+w1, x2+w2), min(y1+h1, y2+h2)
+    inter_area = max(xi2 - xi1, 0) * max(yi2 - yi1, 0)
+    box1_area, box2_area = w1*h1, w2*h2
+    union_area = box1_area + box2_area - inter_area
+    return inter_area / union_area if union_area > 0 else 0
+
+def adjust_boxes(boxes, scale_factor=(1.0, 1.0)):
+    """Adjust bounding boxes by a scale factor."""
+    adjusted_boxes = []
+    for box in boxes:
+        # Assuming box is in tlwh format
+        x, y, w, h = box
+        adjusted_box = [x * scale_factor[0], y * scale_factor[1], (x + w) * scale_factor[0], (y + h) * scale_factor[1]]
+        adjusted_boxes.append(adjusted_box)
+    return adjusted_boxes
+
+def process_video_check_track(video_path, model, device, threshold=0.5):
     model.eval()
     cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        print("Error opening video file")
-        return
-
-    # Initialize ByteTrack
-    tracker = BYTETracker(ByteTrackArgument)
-
-    score_counter = 0  # Initialize a separate score counter
+    tracks = []
 
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        # Debug: Check the type and shape of the frame
-        print(f"Frame type: {type(frame)}, Frame shape: {frame.shape}")
-
-        frame_tensor = T.ToTensor()(frame).unsqueeze_(0).to(device)
-
+        original_width, original_height = frame.shape[1], frame.shape[0]
+        frame_tensor = to_tensor(frame).unsqueeze_(0).to(device)
         with torch.no_grad():
             prediction = model(frame_tensor)[0]
 
-        pred_scores = prediction['scores']
-        pred_boxes = prediction['boxes']
-        pred_labels = prediction['labels']
-        pred_masks = prediction['masks']
+        keep = prediction['scores'] > threshold
+        boxes = prediction['boxes'][keep].cpu()
+        scores = prediction['scores'][keep].cpu()
 
-        keep = pred_scores > threshold
-        pred_boxes = pred_boxes[keep]
-        pred_labels = pred_labels[keep]
-        pred_masks = pred_masks[keep]
+        # Ensure the loop for processing detections and adjusting boxes is correctly scoped
+        for i, box in enumerate(boxes):
+            det = box.numpy()  # Convert to numpy array
+            score = scores[i].item()
 
-        if not keep.any():
-            continue  # Skip this frame if no detections are kept
+            # Scale factor for adjusting boxes to the original frame size
+            scale_factor = (original_width / frame_tensor.shape[3], original_height / frame_tensor.shape[2])
+            adjusted_box = adjust_boxes([det], scale_factor)[0]
+            adjusted_box_tensor = torch.tensor([adjusted_box], dtype=torch.float32)
+            adjusted_tlbr = box_convert(adjusted_box_tensor, in_fmt='xywh', out_fmt='xyxy')
 
-        # Convert numeric labels to class names
-        pred_class_names = [classes[label.item()] for label in pred_labels]
+            matched = False
+            for track in tracks:
+                if iou(adjusted_tlbr.squeeze(0).numpy(), torch.tensor(track.get_tlwh()).unsqueeze(0).numpy()) > 0.5:
+                    track.update(det)
+                    matched = True
+                    break
 
-        # Iterate through each pair of classes to track
-        for class_pair in classes_to_track:
-            class1_boxes = pred_boxes[[name == class_pair[0] for name in pred_class_names]]
-            class2_boxes = pred_boxes[[name == class_pair[1] for name in pred_class_names]]
+            if not matched:
+                tracks.append(Track(det, score))
 
-            # Check for intersections and update score counter
-            for box1 in class1_boxes:
-                for box2 in class2_boxes:
-                    if intersects(box1, box2):
-                        score_counter += 1
-                        print(f"Intersection detected between {class_pair[0]} and {class_pair[1]}, Score:", score_counter)
+        # Prepare the frame for drawing
+        frame_draw = convert_image_dtype(frame_tensor.squeeze(0), dtype=torch.uint8)
 
-        # Frame Tensor Conversion for Drawing
-        frame_tensor = (255.0 * (frame_tensor - frame_tensor.min()) / (frame_tensor.max() - frame_tensor.min())).to(torch.uint8)
-        frame_tensor = frame_tensor.squeeze().to(torch.uint8)
+        # Correctly use adjusted boxes within this loop
+        for track in tracks:
+            tlwh = track.get_tlwh()
+            track_box_adjusted = adjust_boxes([tlwh], scale_factor)[0]
+            track_box_tensor = torch.tensor([track_box_adjusted], dtype=torch.float32)
+            track_tlbr = box_convert(track_box_tensor, in_fmt='xywh', out_fmt='xyxy')
+            frame_draw = draw_bounding_boxes(frame_draw, track_tlbr, colors="blue", width=3)
 
-        # Draw bounding boxes and segmentation masks
-        output_image = draw_bounding_boxes(frame_tensor, pred_boxes, labels=pred_class_names, colors="red")
-        output_image = draw_segmentation_masks(output_image, (pred_masks > 0.7).squeeze(1), alpha=0.5, colors="blue")
-
-        # Convert output image for displaying
-        output_image = output_image.permute(1, 2, 0).cpu().numpy().astype(np.uint8)
-        output_image = np.clip(output_image, 0, 255)  # Ensure values are within 0-255
-
-        # Draw score text
-        cv2.putText(output_image, f'Score: {score_counter}', (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
-
-        # Prepare detections for ByteTrack
-        dets = []
-        for box, det_score in zip(pred_boxes, pred_scores):
-            if det_score > threshold:
-                x1, y1, x2, y2 = box.tolist()
-                current_det = [x1, y1, x2, y2, det_score.item()]
-                dets.append(current_det)
-
-        # Frame information for BYTETracker
-        img_info = {"height": frame.shape[0], "width": frame.shape[1]}
-        img_size = [frame.shape[1], frame.shape[0]]
-
-        # Update ByteTrack
-        online_targets = tracker.update(dets, img_info, img_size)
-
-        # Process tracking results and draw on frame
-        for t in online_targets:
-            tlwh = t.tlwh
-            tid = t.track_id
-            # Draw tracking ID and box (customize as needed)
-            cv2.rectangle(frame, (int(tlwh[0]), int(tlwh[1])), (int(tlwh[0]+tlwh[2]), int(tlwh[1]+tlwh[3])), (0,255,0), 2)
-            cv2.putText(frame, str(tid), (int(tlwh[0]), int(tlwh[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
-        cv2.imshow('Frame', frame)
+        # Convert tensor to numpy array for display
+        output_image = frame_draw.permute(1, 2, 0).cpu().numpy()
+        cv2.imshow('Frame with Tracks', output_image)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
@@ -119,5 +139,3 @@ def process_video_check_track(video_path, model, device, classes, classes_to_tra
     cv2.destroyAllWindows()
 
 
-# Example usage
-# process_video_check_track(video_path, model, device, classes, [('ball', 'rim')], threshold=0.5)
