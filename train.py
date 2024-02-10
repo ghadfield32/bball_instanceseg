@@ -25,35 +25,48 @@ def split_dataset(dataset, split_ratio=0.8):
     train_dataset, valid_dataset = random_split(dataset, [train_size, valid_size], generator=torch.Generator().manual_seed(42))
     return train_dataset, valid_dataset
 
+def upload_to_huggingface(model_directory, model_id):
+    """Upload the model to Hugging Face Hub."""
+    hf_api = HfApi()
+    username = hf_api.whoami()['name']
+    repo_name = f"{username}/{model_id}"
+    repo_url = hf_api.create_repo(repo_name, exist_ok=True, private=False)
+
+    repo = Repository(local_dir=model_directory, clone_from=repo_url, use_auth_token=True)
+    repo.lfs_track(["*.bin", "*.pth", "*.ckpt"])  # Track large model files with Git LFS
+    repo.git_add()
+    repo.git_commit("Initial commit of the model")
+    try:
+        repo.git_push()
+        print(f"Model successfully uploaded to: {repo_url}")
+    except Exception as e:
+        print(f"Failed to upload model to Hugging Face: {e}")
+
+
 def main(args):
-    # Create model path directory
+    data_path = Path(args.data_path)
     model_path = Path(args.model_path)
+    create_directory(data_path)
     create_directory(model_path)
 
-    # Check if dataset is already downloaded
-    project_folder = Path.cwd() / f'{args.project_folder_name}-{args.version}'
-    print(f"Checking dataset at: {project_folder.absolute()}")
+    # Check if the project data is already downloaded
+    project_folder = Path(f'{args.project_folder_name}-{args.version}')
+    classes_path = project_folder / 'train' / '_annotations.coco.json'
+    
+    if not project_folder.exists() or not classes_path.exists():
+        print("Downloading project data...")
+        get_project(args.api_key, args.workspace, args.project_name, args.version)
+
+    # Load classes from JSON
+    classes = load_classes_from_json(classes_path)
+    print("Classes loaded:", classes)
+
+    num_classes = len(classes) + 1
+    device = get_device()
+    model = get_model_instance_segmentation(num_classes, hidden_layer=args.hidden_layer)
+    model.to(device)
     
     if args.mode == 'train':
-        if not project_folder.exists():
-            print("Downloading dataset...")
-            dataset = get_project(args.api_key, args.workspace, args.project_name, args.version)
-        else:
-            print("Project data already downloaded. Skipping download...")
-
-        # Load classes from annotation file
-        classes_path = project_folder / 'train' / '_annotations.coco.json'
-        if not classes_path.exists():
-            print(f"Error: Annotation file for the train dataset not found at {classes_path.absolute()}.")
-            return
-        classes = load_classes_from_json(classes_path)
-        print("Classes loaded:", classes)
-
-        # Initialize model
-        num_classes = len(classes) + 1
-        device = get_device()
-        model = get_model_instance_segmentation(num_classes, hidden_layer=args.hidden_layer)
-        model.to(device)
 
         # Load datasets
         datasets = {}
@@ -74,7 +87,7 @@ def main(args):
             train_dataset, valid_dataset = split_dataset(datasets['train'])
             data_loaders['train'] = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=0, collate_fn=utils.collate_fn)
             data_loaders['valid'] = DataLoader(valid_dataset, batch_size=1, shuffle=False, num_workers=0, collate_fn=utils.collate_fn)
-            
+
         if 'train' in data_loaders and 'valid' in data_loaders:
             print("Starting training process...")
             train_model(model, data_loaders['train'], data_loaders.get('valid'), device, args.num_epochs, lr=args.lr)
@@ -91,14 +104,27 @@ def main(args):
         if not video_path.exists():
             print("Downloading video...")
             download_videos_from_youtube([args.video_url], str(Path(args.data_path)))
-        
+
         if video_path.exists():
             model_file_path = model_path / 'model_weights.pth'
             if model_file_path.exists():
                 model.load_state_dict(torch.load(str(model_file_path), map_location=device))
-                process_video_check(video_path, model, device, classes, [('Basketball', 'Hoop')], threshold=args.threshold)
+                #process_video_check(video_path, model, device, classes, [('Basketball', 'Hoop')], threshold=args.threshold)
+                process_video_check(video_path, model, device, args.project_folder_name, args.version, threshold=args.threshold, output_video_path='tracked_video.mp4')
             else:
                 print("Model weights file not found. Please train the model first.")
+
+    if args.upload_to_hf:
+        hf_login()  # Ensure user is logged in
+
+        # Automatically determine model directory (or you can still ask the user)
+        model_directory = args.model_path  # Assuming this is where your model is saved
+        model_id = input("Enter a name for your model on Hugging Face (e.g., my-cool-model): ")
+
+        try:
+            upload_to_huggingface(model_directory, model_id)
+        except Exception as e:
+            print(f"An error occurred during model upload: {e}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a model for object detection or process video")
@@ -117,6 +143,7 @@ if __name__ == "__main__":
     parser.add_argument('--data_path', type=str, default='results/data', help='Path to save downloaded data')
     parser.add_argument('--model_path', type=str, default='results/models', help='Path to save model weights')
     parser.add_argument('--mode', type=str, choices=['train', 'process_video'], default='train', help='Mode of operation: train or process_video')
-    
+    parser.add_argument('--upload_to_hf', action='store_true', help='Whether to upload the model to Hugging Face')
+
     args = parser.parse_args()
     main(args)
