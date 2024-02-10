@@ -11,7 +11,13 @@ from roboflow import Roboflow
 import torch
 import requests
 import yt_dlp
+import utils
+import shutil
 import os
+import argparse
+import json
+from pathlib import Path
+import torch
 
 def download_videos_from_youtube(video_urls, output_path):
     """
@@ -83,3 +89,48 @@ def create_directory(dir_path):
     """Create a directory if it does not exist."""
     if not os.path.exists(dir_path):
         os.makedirs(dir_path)
+
+
+
+def split_dataset(dataset, split_ratio=0.8):
+    total_size = len(dataset)
+    train_size = int(total_size * split_ratio)
+    valid_size = total_size - train_size
+    train_dataset, valid_dataset = random_split(dataset, [train_size, valid_size], generator=torch.Generator().manual_seed(42))
+    return train_dataset, valid_dataset
+        
+def delete_folder_and_video(folder_path, video_path):
+    """
+    Delete the specified folder and video.
+    
+    Parameters:
+    - folder_path: Path object or str, the path to the folder to delete.
+    - video_path: Path object or str, the path to the video file to delete.
+    """
+    if folder_path.exists():
+        shutil.rmtree(folder_path)
+        print(f"Deleted folder: {folder_path}")
+    else:
+        print(f"Folder not found: {folder_path}")
+    
+    if video_path.exists():
+        os.remove(video_path)
+        print(f"Deleted video: {video_path}")
+    else:
+        print(f"Video not found: {video_path}")
+        
+def load_classes_from_json(file_path):
+    """
+    Loads the class names and their corresponding IDs from a COCO format JSON file.
+
+    Args:
+    file_path (str): Path to the JSON file.
+
+    Returns:
+    dict: A dictionary where keys are class IDs and values are class names.
+    """
+    with open(file_path) as f:
+        data = json.load(f)
+    categories = data['categories']
+    classes = {category['id']: category['name'] for category in categories}
+    return classes

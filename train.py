@@ -3,44 +3,20 @@ import json
 from pathlib import Path
 import torch
 from torch.utils.data import random_split, DataLoader
-from going_modular.utils import get_device, create_directory, get_project, download_videos_from_youtube
+from going_modular.utils import (get_device, create_directory 
+                                ,get_project, download_videos_from_youtube
+                                , delete_folder_and_video, load_classes_from_json
+                                ,split_dataset)
 from going_modular.coco_dataset import CustomCocoDataset
-from going_modular.model_utils import get_model_instance_segmentation
+from going_modular.model_utils import (get_model_instance_segmentation
+                                        , upload_to_huggingface)
 from going_modular.engine import train_model
 from going_modular.transforms import get_transform
 from going_modular.process_video_check import process_video_check
 import utils
+import shutil
+import os
 
-def load_classes_from_json(annotation_path):
-    with open(annotation_path) as f:
-        data = json.load(f)
-    categories = data['categories']
-    classes = {category['id']: category['name'] for category in categories}
-    return classes
-
-def split_dataset(dataset, split_ratio=0.8):
-    total_size = len(dataset)
-    train_size = int(total_size * split_ratio)
-    valid_size = total_size - train_size
-    train_dataset, valid_dataset = random_split(dataset, [train_size, valid_size], generator=torch.Generator().manual_seed(42))
-    return train_dataset, valid_dataset
-
-def upload_to_huggingface(model_directory, model_id):
-    """Upload the model to Hugging Face Hub."""
-    hf_api = HfApi()
-    username = hf_api.whoami()['name']
-    repo_name = f"{username}/{model_id}"
-    repo_url = hf_api.create_repo(repo_name, exist_ok=True, private=False)
-
-    repo = Repository(local_dir=model_directory, clone_from=repo_url, use_auth_token=True)
-    repo.lfs_track(["*.bin", "*.pth", "*.ckpt"])  # Track large model files with Git LFS
-    repo.git_add()
-    repo.git_commit("Initial commit of the model")
-    try:
-        repo.git_push()
-        print(f"Model successfully uploaded to: {repo_url}")
-    except Exception as e:
-        print(f"Failed to upload model to Hugging Face: {e}")
 
 
 def main(args):
@@ -52,7 +28,7 @@ def main(args):
     # Check if the project data is already downloaded
     project_folder = Path(f'{args.project_folder_name}-{args.version}')
     classes_path = project_folder / 'train' / '_annotations.coco.json'
-    
+
     if not project_folder.exists() or not classes_path.exists():
         print("Downloading project data...")
         get_project(args.api_key, args.workspace, args.project_name, args.version)
@@ -65,9 +41,10 @@ def main(args):
     device = get_device()
     model = get_model_instance_segmentation(num_classes, hidden_layer=args.hidden_layer)
     model.to(device)
-    
-    if args.mode == 'train':
 
+    if args.mode == 'train':
+        video_filename = args.video_name if args.video_name.endswith('.mp4') else f"{args.video_name}.mp4"
+        video_path = Path(args.data_path) / video_filename
         # Load datasets
         datasets = {}
         data_loaders = {}
@@ -96,9 +73,12 @@ def main(args):
             print(f"Model saved at: {model_file_path}")
         else:
             print("Training failed. No valid data loaders available.")
+            
+        if args.delete_folder_and_video == True:
+            delete_folder_and_video(project_folder, video_path)
 
     # Process video if mode is 'process_video'
-    if args.mode == 'process_video':
+    elif args.mode == 'process_video':
         video_filename = args.video_name if args.video_name.endswith('.mp4') else f"{args.video_name}.mp4"
         video_path = Path(args.data_path) / video_filename
         if not video_path.exists():
@@ -109,22 +89,30 @@ def main(args):
             model_file_path = model_path / 'model_weights.pth'
             if model_file_path.exists():
                 model.load_state_dict(torch.load(str(model_file_path), map_location=device))
-                #process_video_check(video_path, model, device, classes, [('Basketball', 'Hoop')], threshold=args.threshold)
-                process_video_check(video_path, model, device, args.project_folder_name, args.version, threshold=args.threshold, output_video_path='tracked_video.mp4')
+                classes_to_track = list(zip(args.classes_to_track[::2], args.classes_to_track[1::2]))  # Convert flat list to list of tuples
+                process_video_check(video_path, model, device, classes, classes_to_track, args.threshold, args.check_intersections)
             else:
                 print("Model weights file not found. Please train the model first.")
-
-    if args.upload_to_hf:
+        if args.delete_folder_and_video == True:
+            delete_folder_and_video(project_folder, video_path)
+            
+    elif args.mode == 'hf_upload':
         hf_login()  # Ensure user is logged in
 
         # Automatically determine model directory (or you can still ask the user)
         model_directory = args.model_path  # Assuming this is where your model is saved
-        model_id = input("Enter a name for your model on Hugging Face (e.g., my-cool-model): ")
+        if not Path(model_directory).exists():
+            print(f"Model directory {model_directory} does not exist. Please specify a valid model directory.")
+            return
 
+        model_id = input("Enter a name for your model on Hugging Face (e.g., my-cool-model): ")
         try:
             upload_to_huggingface(model_directory, model_id)
         except Exception as e:
             print(f"An error occurred during model upload: {e}")
+            
+        if args.delete_folder_and_video == True:
+            delete_folder_and_video(project_folder, video_path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a model for object detection or process video")
@@ -142,8 +130,10 @@ if __name__ == "__main__":
     parser.add_argument('--display_video', type=bool, default=True, help='Whether to display the video during processing')
     parser.add_argument('--data_path', type=str, default='results/data', help='Path to save downloaded data')
     parser.add_argument('--model_path', type=str, default='results/models', help='Path to save model weights')
-    parser.add_argument('--mode', type=str, choices=['train', 'process_video'], default='train', help='Mode of operation: train or process_video')
-    parser.add_argument('--upload_to_hf', action='store_true', help='Whether to upload the model to Hugging Face')
+    parser.add_argument('--mode', type=str, choices=['train', 'process_video', 'hf_upload'], default='train', help='Mode of operation: train or process_video')
+    parser.add_argument('--delete_folder_and_video', type=bool, default=False, help='Whether to delete the image folder and download video after use')
+    parser.add_argument('--check_intersections', type=bool, default=False , help='Enable intersection checks in video processing')
+    parser.add_argument('--classes_to_track', nargs='+', help='Classes to track for intersections, specified as pairs', default=[])
 
     args = parser.parse_args()
     main(args)

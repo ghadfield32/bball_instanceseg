@@ -11,7 +11,7 @@ def intersects(box1, box2):
     x2_min, y2_min, x2_max, y2_max = box2.tolist()
     return (x1_min < x2_max and x1_max > x2_min and y1_min < y2_max and y1_max > y2_min)
 
-def process_video_check(video_path, model, device, classes, classes_to_track, threshold=0.5):
+def process_video_check(video_path, model, device, classes, classes_to_track=None, threshold=0.5, check_intersections=False):
     model.eval()
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -40,8 +40,8 @@ def process_video_check(video_path, model, device, classes, classes_to_track, th
         pred_labels = pred_labels[keep]
         pred_masks = pred_masks[keep]
 
-        print(f"Original Frame Size: {frame.shape}")
-        print(f"Pred Boxes before drawing: {pred_boxes}")
+        #print(f"Original Frame Size: {frame.shape}")
+        #print(f"Pred Boxes before drawing: {pred_boxes}")
 
         if not keep.any():
             continue  # Skip this frame if no detections are kept
@@ -49,17 +49,17 @@ def process_video_check(video_path, model, device, classes, classes_to_track, th
         # Convert numeric labels to class names
         pred_class_names = [classes[label.item()] for label in pred_labels]
 
-        # Iterate through each pair of classes to track
-        for class_pair in classes_to_track:
-            class1_boxes = pred_boxes[[name == class_pair[0] for name in pred_class_names]]
-            class2_boxes = pred_boxes[[name == class_pair[1] for name in pred_class_names]]
+        if check_intersections == True and classes_to_track:
+            # Perform intersection checks only if enabled and classes_to_track is specified
+            for class_pair in classes_to_track:
+                class1_boxes = pred_boxes[[name == class_pair[0] for name in pred_class_names]]
+                class2_boxes = pred_boxes[[name == class_pair[1] for name in pred_class_names]]
 
-            # Check for intersections and update score
-            for box1 in class1_boxes:
-                for box2 in class2_boxes:
-                    if intersects(box1, box2):
-                        score += 1
-                        print(f"Intersection detected between {class_pair[0]} and {class_pair[1]}, Score:", score)
+                for box1 in class1_boxes:
+                    for box2 in class2_boxes:
+                        if intersects(box1, box2):
+                            score += 1
+                            print(f"Intersection detected between {class_pair[0]} and {class_pair[1]}, Score:", score)
 
         # Frame Tensor Conversion for Drawing
         frame_tensor = (255.0 * (frame_tensor - frame_tensor.min()) / (frame_tensor.max() - frame_tensor.min())).to(torch.uint8)
@@ -72,14 +72,14 @@ def process_video_check(video_path, model, device, classes, classes_to_track, th
         # Convert output image for displaying
         output_image = output_image.permute(1, 2, 0).cpu().numpy().astype(np.uint8)
         output_image = np.clip(output_image, 0, 255)  # Ensure values are within 0-255
-
-        # Draw score text
-        cv2.putText(output_image, f'Score: {score}', (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+        if check_intersections == True and classes_to_track:
+            # Draw score text
+            cv2.putText(output_image, f'Score: {score}', (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
 
         cv2.imshow('Frame', output_image)
         
         # Just before cv2.imshow
-        print(f"Output Image Size: {output_image.shape}")
+        #print(f"Output Image Size: {output_image.shape}")
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break

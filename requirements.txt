@@ -3,11 +3,13 @@
 #torch
 
 #update 118 to newest version: https://stackoverflow.com/questions/60912744/install-pytorch-from-requirements-txt
---extra-index-url https://download.pytorch.org/whl/cu118
+
+--extra-index-url https://download.pytorch.org/whl/cu121
 torch
 torchvision
 torchaudio
 
+#venv
 matplotlib
 seaborn
 pandas
